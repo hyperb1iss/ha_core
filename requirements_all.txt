@@ -2573,6 +2573,9 @@ sharp_aquos_rc==0.3.2
 # homeassistant.components.shodan
 shodan==1.28.0
 
+# homeassistant.components.signalrgb
+signalrgb==0.9.5
+
 # homeassistant.components.simplefin
 simplefin4py==0.0.16
 
