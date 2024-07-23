@@ -2007,6 +2007,9 @@ sfrbox-api==0.0.8
 # homeassistant.components.sharkiq
 sharkiq==1.0.2
 
+# homeassistant.components.signalrgb
+signalrgb==0.9.0
+
 # homeassistant.components.simplefin
 simplefin4py==0.0.16
 
