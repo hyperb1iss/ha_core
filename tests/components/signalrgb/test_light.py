@@ -103,20 +103,43 @@ class TestSignalRGBLight:
 
     async def test_turn_on(self, mock_light):
         """Test turning on the light."""
-        mock_light.hass.async_add_executor_job.return_value = None
+        mock_effect = MagicMock()
+        mock_effect.id = "test_effect_id"
+        mock_effect.attributes.name = DEFAULT_EFFECT
+
+        mock_light.hass.async_add_executor_job.side_effect = [
+            mock_effect,  # For get_effect_by_name
+            None,  # For apply_effect
+        ]
+
         await mock_light.async_turn_on()
         assert mock_light.is_on
-        mock_light.hass.async_add_executor_job.assert_called_once_with(
-            mock_light._client.apply_effect_by_name, DEFAULT_EFFECT
+        assert mock_light._current_effect == DEFAULT_EFFECT
+        mock_light.hass.async_add_executor_job.assert_any_call(
+            mock_light._client.get_effect_by_name, DEFAULT_EFFECT
+        )
+        mock_light.hass.async_add_executor_job.assert_any_call(
+            mock_light._client.apply_effect, "test_effect_id"
         )
 
     async def test_turn_off(self, mock_light):
         """Test turning off the light."""
-        mock_light.hass.async_add_executor_job.return_value = None
+        mock_effect = MagicMock()
+        mock_effect.id = "all_off_effect_id"
+        mock_effect.attributes.name = ALL_OFF_EFFECT
+
+        mock_light.hass.async_add_executor_job.side_effect = [
+            mock_effect,  # For get_effect_by_name
+            None,  # For apply_effect
+        ]
+
         await mock_light.async_turn_off()
         assert not mock_light.is_on
-        mock_light.hass.async_add_executor_job.assert_called_once_with(
-            mock_light._client.apply_effect_by_name, ALL_OFF_EFFECT
+        mock_light.hass.async_add_executor_job.assert_any_call(
+            mock_light._client.get_effect_by_name, ALL_OFF_EFFECT
+        )
+        mock_light.hass.async_add_executor_job.assert_any_call(
+            mock_light._client.apply_effect, "all_off_effect_id"
         )
 
     async def test_effect_list(self, mock_light):
@@ -133,17 +156,50 @@ class TestSignalRGBLight:
 
     async def test_apply_effect(self, mock_light):
         """Test applying an effect."""
-        mock_light.hass.async_add_executor_job.return_value = None
+        mock_effect = MagicMock()
+        mock_effect.id = "test_effect_id"
+        mock_effect.attributes.name = "Test Effect"
+        mock_effect.attributes.description = "Test Description"
+        mock_effect.attributes.developer_effect = False
+        mock_effect.attributes.publisher = "Test Publisher"
+        mock_effect.attributes.uses_audio = True
+        mock_effect.attributes.uses_input = False
+        mock_effect.attributes.uses_meters = True
+        mock_effect.attributes.uses_video = False
+        mock_effect.attributes.parameters = {"speed": 50, "brightness": 100}
+
+        mock_light.hass.async_add_executor_job.side_effect = [
+            mock_effect,  # For get_effect_by_name
+            None,  # For apply_effect
+        ]
+
         await mock_light._apply_effect("Test Effect")
-        mock_light.hass.async_add_executor_job.assert_called_once_with(
-            mock_light._client.apply_effect_by_name, "Test Effect"
-        )
         assert mock_light.effect == "Test Effect"
+        assert mock_light.extra_state_attributes == {
+            "effect_name": "Test Effect",
+            "effect_description": "Test Description",
+            "effect_developer": False,
+            "effect_publisher": "Test Publisher",
+            "effect_uses_audio": True,
+            "effect_uses_input": False,
+            "effect_uses_meters": True,
+            "effect_uses_video": False,
+            "effect_parameters": {"speed": 50, "brightness": 100},
+        }
 
     async def test_update(self, mock_light):
         """Test updating the light state."""
         mock_effect = MagicMock()
         mock_effect.attributes.name = "Current Effect"
+        mock_effect.attributes.description = "Current Description"
+        mock_effect.attributes.developer_effect = True
+        mock_effect.attributes.publisher = "Current Publisher"
+        mock_effect.attributes.uses_audio = False
+        mock_effect.attributes.uses_input = True
+        mock_effect.attributes.uses_meters = False
+        mock_effect.attributes.uses_video = True
+        mock_effect.attributes.parameters = {"color": "red", "intensity": 75}
+
         mock_light.hass.async_add_executor_job.side_effect = [
             [],  # For get_effects (empty list as it's already populated)
             mock_effect,  # For get_current_effect
@@ -152,6 +208,17 @@ class TestSignalRGBLight:
         await mock_light.async_update()
         assert mock_light.is_on
         assert mock_light.effect == "Current Effect"
+        assert mock_light.extra_state_attributes == {
+            "effect_name": "Current Effect",
+            "effect_description": "Current Description",
+            "effect_developer": True,
+            "effect_publisher": "Current Publisher",
+            "effect_uses_audio": False,
+            "effect_uses_input": True,
+            "effect_uses_meters": False,
+            "effect_uses_video": True,
+            "effect_parameters": {"color": "red", "intensity": 75},
+        }
 
         # Test with ALL_OFF_EFFECT
         mock_effect.attributes.name = ALL_OFF_EFFECT
@@ -161,3 +228,19 @@ class TestSignalRGBLight:
         ]
         await mock_light.async_update()
         assert not mock_light.is_on
+        assert mock_light.extra_state_attributes == {}
+
+    async def test_extra_state_attributes(self, mock_light):
+        """Test extra state attributes."""
+        mock_light._effect_attributes = {
+            "effect_name": "Test Effect",
+            "effect_description": "Test Description",
+            "effect_developer": False,
+            "effect_publisher": "Test Publisher",
+            "effect_uses_audio": True,
+            "effect_uses_input": False,
+            "effect_uses_meters": True,
+            "effect_uses_video": False,
+            "effect_parameters": {"speed": 50, "brightness": 100},
+        }
+        assert mock_light.extra_state_attributes == mock_light._effect_attributes
