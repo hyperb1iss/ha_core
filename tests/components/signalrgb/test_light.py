@@ -90,7 +90,7 @@ async def test_unload_entry(mock_hass, mock_config_entry):
 
 
 class TestSignalRGBLight:
-    """Test class for SignalRGBLight."""
+    """Unit tests for the SignalRGBLight class."""
 
     @pytest.fixture
     def mock_light(self, mock_hass, mock_signalrgb_client, mock_config_entry):
@@ -99,6 +99,7 @@ class TestSignalRGBLight:
         light = SignalRGBLight(client, mock_config_entry)
         light.hass = mock_hass
         light.entity_id = "light.signalrgb"
+        light.async_write_ha_state = MagicMock()
         return light
 
     async def test_turn_on(self, mock_light):
@@ -107,20 +108,23 @@ class TestSignalRGBLight:
         mock_effect.id = "test_effect_id"
         mock_effect.attributes.name = DEFAULT_EFFECT
 
-        mock_light.hass.async_add_executor_job.side_effect = [
-            mock_effect,  # For get_effect_by_name
-            None,  # For apply_effect
-        ]
+        mock_light.hass.async_add_executor_job = AsyncMock(
+            side_effect=[
+                mock_effect,  # For get_effect_by_name
+                None,  # For apply_effect
+            ]
+        )
 
         await mock_light.async_turn_on()
         assert mock_light.is_on
         assert mock_light._current_effect == DEFAULT_EFFECT
-        mock_light.hass.async_add_executor_job.assert_any_call(
+        mock_light.hass.async_add_executor_job.assert_any_await(
             mock_light._client.get_effect_by_name, DEFAULT_EFFECT
         )
-        mock_light.hass.async_add_executor_job.assert_any_call(
+        mock_light.hass.async_add_executor_job.assert_any_await(
             mock_light._client.apply_effect, "test_effect_id"
         )
+        mock_light.async_write_ha_state.assert_called_once()
 
     async def test_turn_off(self, mock_light):
         """Test turning off the light."""
@@ -128,19 +132,22 @@ class TestSignalRGBLight:
         mock_effect.id = "all_off_effect_id"
         mock_effect.attributes.name = ALL_OFF_EFFECT
 
-        mock_light.hass.async_add_executor_job.side_effect = [
-            mock_effect,  # For get_effect_by_name
-            None,  # For apply_effect
-        ]
+        mock_light.hass.async_add_executor_job = AsyncMock(
+            side_effect=[
+                mock_effect,  # For get_effect_by_name
+                None,  # For apply_effect
+            ]
+        )
 
         await mock_light.async_turn_off()
         assert not mock_light.is_on
-        mock_light.hass.async_add_executor_job.assert_any_call(
+        mock_light.hass.async_add_executor_job.assert_any_await(
             mock_light._client.get_effect_by_name, ALL_OFF_EFFECT
         )
-        mock_light.hass.async_add_executor_job.assert_any_call(
+        mock_light.hass.async_add_executor_job.assert_any_await(
             mock_light._client.apply_effect, "all_off_effect_id"
         )
+        mock_light.async_write_ha_state.assert_called_once()
 
     async def test_effect_list(self, mock_light):
         """Test getting the effect list."""
@@ -168,12 +175,22 @@ class TestSignalRGBLight:
         mock_effect.attributes.uses_video = False
         mock_effect.attributes.parameters = {"speed": 50, "brightness": 100}
 
-        mock_light.hass.async_add_executor_job.side_effect = [
-            mock_effect,  # For get_effect_by_name
-            None,  # For apply_effect
-        ]
+        mock_light.hass.async_add_executor_job = AsyncMock(
+            side_effect=[
+                mock_effect,  # For get_effect_by_name
+                None,  # For apply_effect
+            ]
+        )
 
         await mock_light._apply_effect("Test Effect")
+
+        mock_light.hass.async_add_executor_job.assert_any_await(
+            mock_light._client.get_effect_by_name, "Test Effect"
+        )
+        mock_light.hass.async_add_executor_job.assert_any_await(
+            mock_light._client.apply_effect, "test_effect_id"
+        )
+
         assert mock_light.effect == "Test Effect"
         assert mock_light.extra_state_attributes == {
             "effect_name": "Test Effect",
@@ -186,6 +203,7 @@ class TestSignalRGBLight:
             "effect_uses_video": False,
             "effect_parameters": {"speed": 50, "brightness": 100},
         }
+        mock_light.async_write_ha_state.assert_called_once()
 
     async def test_update(self, mock_light):
         """Test updating the light state."""
@@ -219,7 +237,6 @@ class TestSignalRGBLight:
             "effect_uses_video": True,
             "effect_parameters": {"color": "red", "intensity": 75},
         }
-
         # Test with ALL_OFF_EFFECT
         mock_effect.attributes.name = ALL_OFF_EFFECT
         mock_light.hass.async_add_executor_job.side_effect = [
