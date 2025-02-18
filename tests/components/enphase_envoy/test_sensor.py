@@ -1,14 +1,17 @@
 """Test Enphase Envoy sensors."""
 
 from itertools import chain
+import logging
 from unittest.mock import AsyncMock, patch
 
+from freezegun.api import FrozenDateTimeFactory
 from pyenphase.const import PHASENAMES
 import pytest
 from syrupy.assertion import SnapshotAssertion
 
 from homeassistant.components.enphase_envoy.const import Platform
-from homeassistant.const import UnitOfTemperature
+from homeassistant.components.enphase_envoy.coordinator import SCAN_INTERVAL
+from homeassistant.const import STATE_UNKNOWN, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
@@ -16,7 +19,7 @@ from homeassistant.util.unit_conversion import TemperatureConverter
 
 from . import setup_integration
 
-from tests.common import MockConfigEntry, snapshot_platform
+from tests.common import MockConfigEntry, async_fire_time_changed, snapshot_platform
 
 
 @pytest.mark.parametrize(
@@ -24,9 +27,11 @@ from tests.common import MockConfigEntry, snapshot_platform
     [
         "envoy",
         "envoy_1p_metered",
+        "envoy_eu_batt",
         "envoy_metered_batt_relay",
         "envoy_nobatt_metered_3p",
         "envoy_tot_cons_metered",
+        "envoy_acb_batt",
     ],
     indirect=["mock_envoy"],
 )
@@ -57,9 +62,11 @@ PRODUCTION_NAMES: tuple[str, ...] = (
     [
         "envoy",
         "envoy_1p_metered",
+        "envoy_eu_batt",
         "envoy_metered_batt_relay",
         "envoy_nobatt_metered_3p",
         "envoy_tot_cons_metered",
+        "envoy_acb_batt",
     ],
     indirect=["mock_envoy"],
 )
@@ -86,7 +93,7 @@ async def test_sensor_production_data(
 
     for name, target in list(zip(PRODUCTION_NAMES, PRODUCTION_TARGETS, strict=False)):
         assert (entity_state := hass.states.get(f"{ENTITY_BASE}_{name}"))
-        assert target == float(entity_state.state)
+        assert float(entity_state.state) == target
 
 
 PRODUCTION_PHASE_NAMES: list[str] = [
@@ -131,7 +138,7 @@ async def test_sensor_production_phase_data(
         zip(PRODUCTION_PHASE_NAMES, PRODUCTION_PHASE_TARGET, strict=False)
     ):
         assert (entity_state := hass.states.get(f"{ENTITY_BASE}_{name}"))
-        assert target == float(entity_state.state)
+        assert float(entity_state.state) == target
 
 
 CONSUMPTION_NAMES: tuple[str, ...] = (
@@ -146,8 +153,10 @@ CONSUMPTION_NAMES: tuple[str, ...] = (
     ("mock_envoy"),
     [
         "envoy_1p_metered",
+        "envoy_eu_batt",
         "envoy_metered_batt_relay",
         "envoy_nobatt_metered_3p",
+        "envoy_acb_batt",
     ],
     indirect=["mock_envoy"],
 )
@@ -174,7 +183,50 @@ async def test_sensor_consumption_data(
 
     for name, target in list(zip(CONSUMPTION_NAMES, CONSUMPTION_TARGETS, strict=False)):
         assert (entity_state := hass.states.get(f"{ENTITY_BASE}_{name}"))
-        assert target == float(entity_state.state)
+        assert float(entity_state.state) == target
+
+
+NET_CONSUMPTION_NAMES: tuple[str, ...] = (
+    "balanced_net_power_consumption",
+    "lifetime_balanced_net_energy_consumption",
+)
+
+
+@pytest.mark.parametrize(
+    ("mock_envoy"),
+    [
+        "envoy_1p_metered",
+        "envoy_eu_batt",
+        "envoy_metered_batt_relay",
+        "envoy_nobatt_metered_3p",
+        "envoy_tot_cons_metered",
+        "envoy_acb_batt",
+    ],
+    indirect=["mock_envoy"],
+)
+@pytest.mark.usefixtures("entity_registry_enabled_by_default")
+async def test_sensor_net_consumption_data(
+    hass: HomeAssistant,
+    mock_envoy: AsyncMock,
+    config_entry: MockConfigEntry,
+) -> None:
+    """Test net consumption entities values."""
+    with patch("homeassistant.components.enphase_envoy.PLATFORMS", [Platform.SENSOR]):
+        await setup_integration(hass, config_entry)
+
+    sn = mock_envoy.serial_number
+    ENTITY_BASE: str = f"{Platform.SENSOR}.envoy_{sn}"
+
+    data = mock_envoy.data.system_net_consumption
+    NET_CONSUMPTION_TARGETS = (
+        data.watts_now / 1000.0,
+        data.watt_hours_lifetime / 1000.0,
+    )
+    for name, target in list(
+        zip(NET_CONSUMPTION_NAMES, NET_CONSUMPTION_TARGETS, strict=False)
+    ):
+        assert (entity_state := hass.states.get(f"{ENTITY_BASE}_{name}"))
+        assert float(entity_state.state) == target
 
 
 CONSUMPTION_PHASE_NAMES: list[str] = [
@@ -219,7 +271,49 @@ async def test_sensor_consumption_phase_data(
         zip(CONSUMPTION_PHASE_NAMES, CONSUMPTION_PHASE_TARGET, strict=False)
     ):
         assert (entity_state := hass.states.get(f"{ENTITY_BASE}_{name}"))
-        assert target == float(entity_state.state)
+        assert float(entity_state.state) == target
+
+
+NET_CONSUMPTION_PHASE_NAMES: list[str] = [
+    f"{name}_{phase.lower()}" for phase in PHASENAMES for name in NET_CONSUMPTION_NAMES
+]
+
+
+@pytest.mark.parametrize(
+    ("mock_envoy"),
+    [
+        "envoy_metered_batt_relay",
+        "envoy_nobatt_metered_3p",
+    ],
+    indirect=["mock_envoy"],
+)
+@pytest.mark.usefixtures("entity_registry_enabled_by_default")
+async def test_sensor_net_consumption_phase_data(
+    hass: HomeAssistant,
+    mock_envoy: AsyncMock,
+    config_entry: MockConfigEntry,
+) -> None:
+    """Test consumption phase entities values."""
+    with patch("homeassistant.components.enphase_envoy.PLATFORMS", [Platform.SENSOR]):
+        await setup_integration(hass, config_entry)
+
+    sn = mock_envoy.serial_number
+    ENTITY_BASE: str = f"{Platform.SENSOR}.envoy_{sn}"
+
+    NET_CONSUMPTION_PHASE_TARGET = chain(
+        *[
+            (
+                phase_data.watts_now / 1000.0,
+                phase_data.watt_hours_lifetime / 1000.0,
+            )
+            for phase_data in mock_envoy.data.system_net_consumption_phases.values()
+        ]
+    )
+    for name, target in list(
+        zip(NET_CONSUMPTION_PHASE_NAMES, NET_CONSUMPTION_PHASE_TARGET, strict=False)
+    ):
+        assert (entity_state := hass.states.get(f"{ENTITY_BASE}_{name}"))
+        assert float(entity_state.state) == target
 
 
 CT_PRODUCTION_NAMES_INT = ("meter_status_flags_active_production_ct",)
@@ -254,14 +348,14 @@ async def test_sensor_production_ct_data(
         zip(CT_PRODUCTION_NAMES_INT, CT_PRODUCTION_TARGETS_INT, strict=False)
     ):
         assert (entity_state := hass.states.get(f"{ENTITY_BASE}_{name}"))
-        assert target == float(entity_state.state)
+        assert float(entity_state.state) == target
 
     CT_PRODUCTION_TARGETS_STR = (data.metering_status,)
     for name, target in list(
         zip(CT_PRODUCTION_NAMES_STR, CT_PRODUCTION_TARGETS_STR, strict=False)
     ):
         assert (entity_state := hass.states.get(f"{ENTITY_BASE}_{name}"))
-        assert target == entity_state.state
+        assert entity_state.state == target
 
 
 CT_PRODUCTION_NAMES_FLOAT_PHASE = [
@@ -311,7 +405,7 @@ async def test_sensor_production_ct_phase_data(
         )
     ):
         assert (entity_state := hass.states.get(f"{ENTITY_BASE}_{name}"))
-        assert target == float(entity_state.state)
+        assert float(entity_state.state) == target
 
     CT_PRODUCTION_NAMES_STR_TARGET = [
         phase_data.metering_status
@@ -326,7 +420,7 @@ async def test_sensor_production_ct_phase_data(
         )
     ):
         assert (entity_state := hass.states.get(f"{ENTITY_BASE}_{name}"))
-        assert target == entity_state.state
+        assert entity_state.state == target
 
 
 CT_CONSUMPTION_NAMES_FLOAT: tuple[str, ...] = (
@@ -376,14 +470,14 @@ async def test_sensor_consumption_ct_data(
         zip(CT_CONSUMPTION_NAMES_FLOAT, CT_CONSUMPTION_TARGETS_FLOAT, strict=False)
     ):
         assert (entity_state := hass.states.get(f"{ENTITY_BASE}_{name}"))
-        assert target == float(entity_state.state)
+        assert float(entity_state.state) == target
 
     CT_CONSUMPTION_TARGETS_STR = (data.metering_status,)
     for name, target in list(
         zip(CT_CONSUMPTION_NAMES_STR, CT_CONSUMPTION_TARGETS_STR, strict=False)
     ):
         assert (entity_state := hass.states.get(f"{ENTITY_BASE}_{name}"))
-        assert target == entity_state.state
+        assert entity_state.state == target
 
 
 CT_CONSUMPTION_NAMES_FLOAT_PHASE = [
@@ -442,7 +536,7 @@ async def test_sensor_consumption_ct_phase_data(
         )
     ):
         assert (entity_state := hass.states.get(f"{ENTITY_BASE}_{name}"))
-        assert target == float(entity_state.state)
+        assert float(entity_state.state) == target
 
     CT_CONSUMPTION_NAMES_STR_PHASE_TARGET = [
         phase_data.metering_status
@@ -457,7 +551,7 @@ async def test_sensor_consumption_ct_phase_data(
         )
     ):
         assert (entity_state := hass.states.get(f"{ENTITY_BASE}_{name}"))
-        assert target == entity_state.state
+        assert entity_state.state == target
 
 
 CT_STORAGE_NAMES_FLOAT = (
@@ -503,14 +597,14 @@ async def test_sensor_storage_ct_data(
         zip(CT_STORAGE_NAMES_FLOAT, CT_STORAGE_TARGETS_FLOAT, strict=False)
     ):
         assert (entity_state := hass.states.get(f"{ENTITY_BASE}_{name}"))
-        assert target == float(entity_state.state)
+        assert float(entity_state.state) == target
 
     CT_STORAGE_TARGETS_STR = (data.metering_status,)
     for name, target in list(
         zip(CT_STORAGE_NAMES_STR, CT_STORAGE_TARGETS_STR, strict=False)
     ):
         assert (entity_state := hass.states.get(f"{ENTITY_BASE}_{name}"))
-        assert target == entity_state.state
+        assert entity_state.state == target
 
 
 CT_STORAGE_NAMES_FLOAT_PHASE = [
@@ -565,7 +659,7 @@ async def test_sensor_storage_ct_phase_data(
         )
     ):
         assert (entity_state := hass.states.get(f"{ENTITY_BASE}_{name}"))
-        assert target == float(entity_state.state)
+        assert float(entity_state.state) == target
 
     CT_STORAGE_NAMES_STR_PHASE_TARGET = [
         phase_data.metering_status
@@ -580,7 +674,7 @@ async def test_sensor_storage_ct_phase_data(
         )
     ):
         assert (entity_state := hass.states.get(f"{ENTITY_BASE}_{name}"))
-        assert target == entity_state.state
+        assert entity_state.state == target
 
 
 @pytest.mark.parametrize(
@@ -650,6 +744,7 @@ async def test_sensor_storage_phase_disabled_by_integration(
     [
         "envoy",
         "envoy_1p_metered",
+        "envoy_eu_batt",
         "envoy_metered_batt_relay",
         "envoy_nobatt_metered_3p",
         "envoy_tot_cons_metered",
@@ -670,11 +765,11 @@ async def test_sensor_inverter_data(
 
     for sn, inverter in mock_envoy.data.inverters.items():
         assert (entity_state := hass.states.get(f"{entity_base}_{sn}"))
-        assert (inverter.last_report_watts) == float(entity_state.state)
+        assert float(entity_state.state) == (inverter.last_report_watts)
         assert (last_reported := hass.states.get(f"{entity_base}_{sn}_last_reported"))
-        assert dt_util.utc_from_timestamp(
-            inverter.last_report_date
-        ) == dt_util.parse_datetime(last_reported.state)
+        assert dt_util.parse_datetime(
+            last_reported.state
+        ) == dt_util.utc_from_timestamp(inverter.last_report_date)
 
 
 @pytest.mark.parametrize(
@@ -682,6 +777,7 @@ async def test_sensor_inverter_data(
     [
         "envoy",
         "envoy_1p_metered",
+        "envoy_eu_batt",
         "envoy_metered_batt_relay",
         "envoy_nobatt_metered_3p",
         "envoy_tot_cons_metered",
@@ -711,6 +807,7 @@ async def test_sensor_inverter_disabled_by_integration(
     ("mock_envoy"),
     [
         "envoy_metered_batt_relay",
+        "envoy_acb_batt",
     ],
     indirect=["mock_envoy"],
 )
@@ -736,7 +833,7 @@ async def test_sensor_encharge_aggregate_data(
         ("battery_capacity", data.max_available_capacity),
     ):
         assert (entity_state := hass.states.get(f"{ENTITY_BASE}_{target[0]}"))
-        assert target[1] == float(entity_state.state)
+        assert float(entity_state.state) == target[1]
 
 
 @pytest.mark.parametrize(
@@ -759,25 +856,29 @@ async def test_sensor_encharge_enpower_data(
     ENTITY_BASE = f"{Platform.SENSOR}.enpower"
 
     assert (entity_state := hass.states.get(f"{ENTITY_BASE}_{sn}_temperature"))
-    assert mock_envoy.data.enpower.temperature == round(
-        TemperatureConverter.convert(
-            float(entity_state.state),
-            hass.config.units.temperature_unit,
-            UnitOfTemperature.FAHRENHEIT
-            if mock_envoy.data.enpower.temperature_unit == "F"
-            else UnitOfTemperature.CELSIUS,
+    assert (
+        round(
+            TemperatureConverter.convert(
+                float(entity_state.state),
+                hass.config.units.temperature_unit,
+                UnitOfTemperature.FAHRENHEIT
+                if mock_envoy.data.enpower.temperature_unit == "F"
+                else UnitOfTemperature.CELSIUS,
+            )
         )
+        == mock_envoy.data.enpower.temperature
     )
     assert (entity_state := hass.states.get(f"{ENTITY_BASE}_{sn}_last_reported"))
-    assert dt_util.utc_from_timestamp(
+    assert dt_util.parse_datetime(entity_state.state) == dt_util.utc_from_timestamp(
         mock_envoy.data.enpower.last_report_date
-    ) == dt_util.parse_datetime(entity_state.state)
+    )
 
 
 @pytest.mark.parametrize(
     ("mock_envoy"),
     [
         "envoy_metered_batt_relay",
+        "envoy_acb_batt",
     ],
     indirect=["mock_envoy"],
 )
@@ -813,23 +914,121 @@ async def test_sensor_encharge_power_data(
     for sn, sn_target in ENCHARGE_POWER_TARGETS:
         for name, target in list(zip(ENCHARGE_POWER_NAMES, sn_target, strict=False)):
             assert (entity_state := hass.states.get(f"{ENTITY_BASE}_{sn}_{name}"))
-            assert target == float(entity_state.state)
+            assert float(entity_state.state) == target
 
     for sn, encharge_inventory in mock_envoy.data.encharge_inventory.items():
         assert (entity_state := hass.states.get(f"{ENTITY_BASE}_{sn}_temperature"))
-        assert encharge_inventory.temperature == round(
-            TemperatureConverter.convert(
-                float(entity_state.state),
-                hass.config.units.temperature_unit,
-                UnitOfTemperature.FAHRENHEIT
-                if encharge_inventory.temperature_unit == "F"
-                else UnitOfTemperature.CELSIUS,
+        assert (
+            round(
+                TemperatureConverter.convert(
+                    float(entity_state.state),
+                    hass.config.units.temperature_unit,
+                    UnitOfTemperature.FAHRENHEIT
+                    if encharge_inventory.temperature_unit == "F"
+                    else UnitOfTemperature.CELSIUS,
+                )
             )
+            == encharge_inventory.temperature
         )
         assert (entity_state := hass.states.get(f"{ENTITY_BASE}_{sn}_last_reported"))
-        assert dt_util.utc_from_timestamp(
+        assert dt_util.parse_datetime(entity_state.state) == dt_util.utc_from_timestamp(
             encharge_inventory.last_report_date
-        ) == dt_util.parse_datetime(entity_state.state)
+        )
+
+
+ACB_POWER_INT_NAMES: tuple[str, ...] = (
+    "power",
+    "battery",
+)
+ACB_POWER_STR_NAMES: tuple[str, ...] = ("battery_state",)
+
+
+@pytest.mark.parametrize(
+    ("mock_envoy"),
+    [
+        "envoy_acb_batt",
+    ],
+    indirect=["mock_envoy"],
+)
+async def test_sensor_acb_power_data(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    mock_envoy: AsyncMock,
+) -> None:
+    """Test enphase_envoy acb battery power entities values."""
+    with patch("homeassistant.components.enphase_envoy.PLATFORMS", [Platform.SENSOR]):
+        await setup_integration(hass, config_entry)
+
+    sn = mock_envoy.serial_number
+    ENTITY_BASE: str = f"{Platform.SENSOR}.acb_{sn}"
+
+    data = mock_envoy.data.acb_power
+    ACB_POWER_INT_TARGETS: tuple[int, ...] = (
+        data.power,
+        data.state_of_charge,
+    )
+    ACB_POWER_STR_TARGETS: tuple[int, ...] = (data.state,)
+
+    for name, target in list(
+        zip(ACB_POWER_INT_NAMES, ACB_POWER_INT_TARGETS, strict=False)
+    ):
+        assert (entity_state := hass.states.get(f"{ENTITY_BASE}_{name}"))
+        assert int(entity_state.state) == target
+
+    for name, target in list(
+        zip(ACB_POWER_STR_NAMES, ACB_POWER_STR_TARGETS, strict=False)
+    ):
+        assert (entity_state := hass.states.get(f"{ENTITY_BASE}_{name}"))
+        assert entity_state.state == target
+
+
+AGGREGATED_BATTERY_NAMES: tuple[str, ...] = (
+    "aggregated_battery_soc",
+    "aggregated_available_battery_energy",
+    "aggregated_battery_capacity",
+)
+AGGREGATED_ACB_BATTERY_NAMES: tuple[str, ...] = ("available_acb_battery_energy",)
+
+
+@pytest.mark.parametrize(
+    ("mock_envoy"),
+    [
+        "envoy_acb_batt",
+    ],
+    indirect=["mock_envoy"],
+)
+async def test_sensor_aggegated_battery_data(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    mock_envoy: AsyncMock,
+) -> None:
+    """Test enphase_envoy aggregated batteries entities values."""
+    with patch("homeassistant.components.enphase_envoy.PLATFORMS", [Platform.SENSOR]):
+        await setup_integration(hass, config_entry)
+
+    sn = mock_envoy.serial_number
+    ENTITY_BASE: str = f"{Platform.SENSOR}.envoy_{sn}"
+
+    data = mock_envoy.data.battery_aggregate
+    AGGREGATED_TARGETS: tuple[int, ...] = (
+        data.state_of_charge,
+        data.available_energy,
+        data.max_available_capacity,
+    )
+
+    for name, target in list(
+        zip(AGGREGATED_BATTERY_NAMES, AGGREGATED_TARGETS, strict=False)
+    ):
+        assert (entity_state := hass.states.get(f"{ENTITY_BASE}_{name}"))
+        assert int(entity_state.state) == target
+
+    data = mock_envoy.data.acb_power
+    AGGREGATED_ACB_TARGETS: tuple[int, ...] = (data.charge_wh,)
+    for name, target in list(
+        zip(AGGREGATED_ACB_BATTERY_NAMES, AGGREGATED_ACB_TARGETS, strict=False)
+    ):
+        assert (entity_state := hass.states.get(f"{ENTITY_BASE}_{name}"))
+        assert int(entity_state.state) == target
 
 
 def integration_disabled_entities(
@@ -843,3 +1042,98 @@ def integration_disabled_entities(
         )
         if entity_entry.disabled_by == er.RegistryEntryDisabler.INTEGRATION
     ]
+
+
+@pytest.mark.parametrize(
+    ("mock_envoy"),
+    [
+        "envoy_metered_batt_relay",
+    ],
+    indirect=["mock_envoy"],
+)
+@pytest.mark.usefixtures("entity_registry_enabled_by_default")
+async def test_sensor_missing_data(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    mock_envoy: AsyncMock,
+    entity_registry: er.EntityRegistry,
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    """Test enphase_envoy sensor platform midding data handling."""
+    with patch("homeassistant.components.enphase_envoy.PLATFORMS", [Platform.SENSOR]):
+        await setup_integration(hass, config_entry)
+
+    ENTITY_BASE = f"{Platform.SENSOR}.envoy_{mock_envoy.serial_number}"
+
+    # force missing data to test 'if == none' code sections
+    mock_envoy.data.system_production_phases["L2"] = None
+    mock_envoy.data.system_consumption_phases["L2"] = None
+    mock_envoy.data.system_net_consumption_phases["L2"] = None
+    mock_envoy.data.ctmeter_production = None
+    mock_envoy.data.ctmeter_consumption = None
+    mock_envoy.data.ctmeter_storage = None
+    mock_envoy.data.ctmeter_production_phases = None
+    mock_envoy.data.ctmeter_consumption_phases = None
+    mock_envoy.data.ctmeter_storage_phases = None
+
+    # use different inverter serial to test 'expected inverter missing' code
+    mock_envoy.data.inverters["2"] = mock_envoy.data.inverters.pop("1")
+
+    # force HA to detect changed data by changing raw
+    mock_envoy.data.raw = {"I": "am changed"}
+
+    # MOve time to next update
+    freezer.tick(SCAN_INTERVAL)
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    # all these should now be in unknown state
+    for entity in (
+        "lifetime_energy_production_l2",
+        "lifetime_energy_consumption_l2",
+        "metering_status_production_ct",
+        "metering_status_net_consumption_ct",
+        "metering_status_storage_ct",
+        "metering_status_production_ct_l2",
+        "metering_status_net_consumption_ct_l2",
+        "metering_status_storage_ct_l2",
+    ):
+        assert (entity_state := hass.states.get(f"{ENTITY_BASE}_{entity}"))
+        assert entity_state.state == STATE_UNKNOWN
+
+    # test the original inverter is now unknown
+    assert (entity_state := hass.states.get("sensor.inverter_1"))
+    assert entity_state.state == STATE_UNKNOWN
+
+
+@pytest.mark.parametrize(
+    ("mock_envoy"),
+    [
+        "envoy_metered_batt_relay",
+    ],
+    indirect=["mock_envoy"],
+)
+@pytest.mark.usefixtures("entity_registry_enabled_by_default")
+async def test_fw_update(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    mock_envoy: AsyncMock,
+    entity_registry: er.EntityRegistry,
+    freezer: FrozenDateTimeFactory,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test enphase_envoy sensor update over fw update."""
+    logging.getLogger("homeassistant.components.enphase_envoy").setLevel(logging.DEBUG)
+    with patch("homeassistant.components.enphase_envoy.PLATFORMS", [Platform.SENSOR]):
+        await setup_integration(hass, config_entry)
+
+    # force HA to detect changed data by changing raw
+    mock_envoy.firmware = "0.0.0"
+
+    # Move time to next update
+    freezer.tick(SCAN_INTERVAL)
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert "firmware changed from: " in caplog.text
+    assert "to: 0.0.0, reloading enphase envoy integration" in caplog.text
